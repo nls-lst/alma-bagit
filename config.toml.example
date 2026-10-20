@@ -21,7 +21,6 @@ out = "output"
 # How many files to download at once. Lower it if your file host struggles.
 workers = 8
 
-# The API key belongs in the ALMA_API_PROD environment variable, or in a .env
-# file beside alma_bag.py (ALMA_API_PROD=<key>) - not in this file. If you
-# must keep it here instead:
-# api_key = ""
+# The API key does not go in this file, which is easy to share by mistake. Set
+# the ALMA_API_KEY environment variable, or put ALMA_API_KEY=<key> in a .env
+# file beside alma_bag.py.

@@ -2,18 +2,17 @@
 MARCXML and the file linked from its electronic portfolio.
 
     uv run alma_bag.py                     # harvest the sets, then bag them
-    uv run alma_bag.py --limit 5           # test run over the first few records
 
 Or a step at a time, when a harvest needs more than one attempt:
 
     uv run alma_bag.py harvest             # re-run to retry what failed
+    uv run alma_bag.py harvest --limit 50  # test run over the first few records
     uv run alma_bag.py bag                 # bag and zip what's downloaded
     uv run alma_bag.py sample              # small bag of a few records, to send for checking
 
-Records with no portfolio attached are detailed in no-portfolio.csv at the end
-of every harvest.
+report.csv lists every record with its status, title and catalogue details.
 
-Sets and defaults live in config.toml; the API key in ALMA_API_PROD or .env.
+Sets and defaults live in config.toml; the API key in ALMA_API_KEY or .env.
 See README.md for why harvesting and bagging are separate steps.
 """
 
@@ -27,6 +26,7 @@ import shutil
 import time
 import tomllib
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
@@ -38,11 +38,14 @@ from urllib3.util.retry import Retry
 
 HERE = Path(__file__).parent
 MARC_NS = "http://www.loc.gov/MARC21/slim"
-FIELDS = ["mms_id", "portfolio_id", "portfolios", "file", "url", "status"]
+FIELDS = [
+    "mms_id", "title", "status", "portfolio_id", "portfolios", "file", "url", "856_url",
+    "created", "created_by", "modified", "modified_by", "originating_system", "suppressed",
+]
 PAYLOAD = (".pdf", ".epub")
 DEFAULTS = {
     "base": "https://api-eu.hosted.exlibrisgroup.com/almaws/v1",
-    "api_key": "", "out": "output", "work": "harvest", "name": "BAG_{date}", "workers": 8, "sets": [],
+    "out": "output", "work": "harvest", "name": "BAG_{date}", "workers": 8, "sets": [],
 }
 CONFIG = {}
 
@@ -85,9 +88,10 @@ files = session(**{"User-Agent": "Mozilla/5.0 (compatible; alma-bagit/1.0)"})
 def alma():
     """The Alma session, built on first use so the offline steps need no key."""
     load_dotenv()
-    key = os.environ.get("ALMA_API_PROD", "").strip() or CONFIG["api_key"].strip()
+    # ALMA_API_PROD is the older name, still accepted.
+    key = (os.environ.get("ALMA_API_KEY") or os.environ.get("ALMA_API_PROD") or "").strip()
     if not key:
-        raise SystemExit("No Alma API key - set ALMA_API_PROD, put it in .env, or set api_key in config.toml.")
+        raise SystemExit("No Alma API key - set ALMA_API_KEY, or put ALMA_API_KEY=<key> in a .env file beside the script.")
     return session(Authorization=f"apikey {key}")
 
 
@@ -149,11 +153,24 @@ def fetch_bibs(mms_ids, root):
     for start in range(0, len(mms_ids), 100):
         batch = mms_ids[start : start + 100]
         for bib in get("bibs", mms_id=",".join(batch), view="full", expand="e_avail").findall("bib"):
-            mms_id = (bib.findtext("mms_id") or "").strip()
+            field = {el.tag: (el.text or "").strip() for el in bib}
+            mms_id = field.get("mms_id", "")
             record = bib.find("record")
             # AVE $8 is the portfolio ID; there should be exactly one.
             portfolios = subfields(record, "AVE", "8") if record is not None else []
-            row = rows[mms_id] = row_for(mms_id, portfolios=len(portfolios))
+            links = subfields(record, "856", "u") if record is not None else []
+            row = rows[mms_id] = row_for(
+                mms_id,
+                portfolios=len(portfolios),
+                title=field.get("title", ""),
+                created=field.get("created_date", "")[:10],
+                created_by=field.get("created_by", ""),
+                modified=field.get("last_modified_date", "")[:10],
+                modified_by=field.get("last_modified_by", ""),
+                originating_system=field.get("originating_system", ""),
+                suppressed=field.get("suppress_from_publishing", ""),
+                **{"856_url": links[0] if links else ""},
+            )
             if record is None:
                 row["status"] = "no marcxml returned"
             elif not portfolios:
@@ -292,11 +309,14 @@ def harvest(args):
         if not args.limit:
             cache.write_text(json.dumps(rows, indent=1), encoding="utf-8")
     done = write_report(rows, root, args.out / "report.csv")
-    try:
-        describe_no_portfolio(rows, args.out / "no-portfolio.csv")
-    except (Exception, SystemExit) as exc:  # noqa: BLE001 - a finished harvest shouldn't die on the postmortem
-        print(f"  (couldn't detail the no-portfolio records: {type(exc).__name__}: {exc})")
-    if len(done) < len(rows):
+    orphans = [r for r in rows if r["status"] == "no portfolio attached"]
+    if orphans:
+        # The 856 link is usually what someone needs to attach the missing portfolio.
+        with_link = sum(1 for r in orphans if r.get("856_url"))
+        print(f"  {len(orphans)} have no portfolio ({with_link} with an 856 link)")
+    if args.limit:
+        print("Test run (--limit): not cached and not bagged. `sample` will bag what's here.")
+    elif len(done) < len(rows):
         print("Re-run to retry the rest before bagging.")
     return len(done) == len(rows)
 
@@ -307,15 +327,8 @@ def harvest_and_bag(args):
     Only bags once every record is on disk - the file host is flaky enough that
     a first pass usually leaves some behind, and a partial bag is not worth
     building. Re-running picks up where it left off.
-
-    A `--limit` test run stops before bagging: it would claim today's bag name
-    for a handful of records, and it caches no metadata for `bag` to use.
     """
-    if not harvest(args):
-        return
-    if args.limit:
-        print("Test run (--limit), so not bagging. `sample` will bag what's here if you want to look at one.")
-    else:
+    if harvest(args):
         bag(args)
 
 
@@ -349,9 +362,18 @@ def build_bag(root, processes):
 
 
 def zip_bag(root, out, name):
-    print(f"Zipping {root}.zip (several minutes for a payload this size)...", flush=True)
-    shutil.make_archive(str(root), "zip", out, name)
-    print(f"  wrote {root}.zip ({Path(str(root) + '.zip').stat().st_size / 1e6:,.0f} MB)")
+    """Zip the bag under a temporary name, and give it the real one only once the
+    archive checks out - so an interrupted or corrupt zip never looks finished."""
+    final, partial = Path(f"{root}.zip"), Path(f"{root}.partial.zip")
+    print(f"Zipping {final} (several minutes for a payload this size)...", flush=True)
+    shutil.make_archive(str(partial.with_suffix("")), "zip", out, name)
+    print("  checking the zip...", flush=True)
+    with zipfile.ZipFile(partial) as archive:
+        bad = archive.testzip()
+    if bad:
+        raise SystemExit(f"{partial} is corrupt (first bad file: {bad}) - delete it and re-run.")
+    partial.replace(final)
+    print(f"  wrote {final} ({final.stat().st_size / 1e6:,.0f} MB)")
 
 
 def bag(args):
@@ -370,7 +392,7 @@ def bag(args):
     elif not cache.exists():
         raise SystemExit(f"No harvested metadata at {cache} - run `harvest` first.")
     else:
-        rows = json.loads(cache.read_text(encoding="utf-8"))[: args.limit]
+        rows = json.loads(cache.read_text(encoding="utf-8"))
         done = write_report(rows, work, args.out / "report.csv", announce=False)
         if not done:
             raise SystemExit("Nothing to bag.")
@@ -444,50 +466,6 @@ def sample(args):
         zip_bag(root, root.parent, name)
 
 
-# --- no-portfolio -----------------------------------------------------------
-
-def describe_no_portfolio(rows, out):
-    """Detail the records that came back with no electronic portfolio.
-
-    Run at the end of every harvest: these are the records the bag will be
-    missing, and the 856 link is usually what someone needs to fix them.
-    """
-    ids = [r["mms_id"] for r in rows if r["status"] == "no portfolio attached"]
-    if not ids:
-        return
-    detail = []
-    bibs = (bib for start in range(0, len(ids), 100)  # Alma takes at most 100 IDs per call
-            for bib in get("bibs", mms_id=",".join(ids[start : start + 100]), view="full").findall("bib"))
-    for bib in bibs:
-        record = bib.find("record")
-        if record is None:
-            continue
-        field = {el.tag: (el.text or "").strip() for el in bib}
-        urls = subfields(record, "856", "u")
-        detail.append({
-            "mms_id": field.get("mms_id", ""),
-            "created": field.get("created_date", "")[:10],
-            "created_by": field.get("created_by", ""),
-            "modified": field.get("last_modified_date", "")[:10],
-            "modified_by": field.get("last_modified_by", ""),
-            "export_codes": "|".join(subfields(record, "948", "a")),
-            "originating_system": field.get("originating_system", ""),
-            "suppressed": field.get("suppress_from_publishing", ""),
-            "856_url": urls[0] if urls else "",
-            "title": field.get("title", ""),
-        })
-    if not detail:
-        print(f"{len(ids)} records have no portfolio, and no bib at all came back for them.")
-        return
-    detail.sort(key=lambda d: (d["created"], d["mms_id"]))
-    with out.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, list(detail[0]))
-        writer.writeheader()
-        writer.writerows(detail)
-    print(f"{len(ids)} records have no portfolio: {sum(1 for d in detail if d['856_url'])} of them have an 856 "
-          f"link to fall back on, {len(ids) - len(detail)} returned no bib at all ({out})")
-
-
 # --- cli --------------------------------------------------------------------
 
 def main():
@@ -497,13 +475,13 @@ def main():
     parser.add_argument("--out", type=Path, help="working directory")
     parser.add_argument("--name", help="bag folder/zip name")
     parser.add_argument("--workers", type=int, help="concurrent downloads / hashing processes")
-    parser.add_argument("--limit", type=int, help="only process the first N records")
-    parser.set_defaults(run=harvest_and_bag, sets=None, refresh=False, no_zip=False)
+    parser.set_defaults(run=harvest_and_bag, sets=None, refresh=False, limit=None, no_zip=False)
     commands = parser.add_subparsers(dest="command")
 
     harvest_cmd = commands.add_parser("harvest", help="fetch metadata and files")
     harvest_cmd.add_argument("--sets", nargs="+", help="Alma set IDs (default: config.toml)")
     harvest_cmd.add_argument("--refresh", action="store_true", help="re-fetch set members and bibs")
+    harvest_cmd.add_argument("--limit", type=int, help="test run: only the first N records, not cached")
     harvest_cmd.set_defaults(run=harvest)
 
     bag_cmd = commands.add_parser("bag", help="bag and zip what's downloaded")

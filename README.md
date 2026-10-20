@@ -6,8 +6,7 @@ and the file linked from the record's electronic portfolio.
 
 Written for delivering e-deposit records for central ingest.
 It should work for any library on Alma: point it at your own sets and name the bag
-after your institution. Cover images, which the spec also describes, are not
-included.
+after your institution. Cover images are not included.
 
 ## Setup
 
@@ -17,8 +16,9 @@ Configuration (sets) and Bibliographic Records & Inventory.
 
 1. Copy `config.toml.example` to `config.toml` and fill in your set IDs, bag
    name and API region.
-2. Put the API key in the `ALMA_API_PROD` environment variable, or in a `.env`
-   file beside the script containing `ALMA_API_PROD=<key>`. Both `config.toml`
+2. Put the API key in the `ALMA_API_KEY` environment variable, or in a `.env`
+   file beside the script containing `ALMA_API_KEY=<key>`. It can't go in
+   `config.toml`, which is the file most likely to be shared. Both `config.toml`
    and `.env` are gitignored.
 
 Only harvesting needs the key: `bag`, `sample` and re-zipping run without one.
@@ -26,7 +26,6 @@ Only harvesting needs the key: `bag`, `sample` and re-zipping run without one.
 ## Usage
 
 ```sh
-uv run alma_bag.py --limit 5           # test run over the first few records (harvest only, not bagged)
 uv run alma_bag.py                     # harvest the sets in config.toml, then bag them
 ```
 
@@ -39,6 +38,7 @@ The steps are also available separately:
 
 ```sh
 uv run alma_bag.py harvest             # fetch only; re-run to retry what failed
+uv run alma_bag.py harvest --limit 50  # test run over the first 50 records (not cached)
 uv run alma_bag.py bag                 # bag and zip what's on disk
 uv run alma_bag.py sample              # small bag of a few records, to send for checking
 ```
@@ -50,16 +50,12 @@ out with one delivery date).
 
 A bag is only built once every record is on disk, in case of a flaky file host.
 Metadata is cached in `records.json` and files already on disk are skipped.
-`report.csv` says what & why on missing recs.
+`report.csv` lists every record with its status (what's missing and why), title,
+`856` link and catalogue dates; filter on `status` for the problems.
 
-Every harvest ends by detailing the records that came back with no portfolio
-attached into `no-portfolio.csv` -- what the bag will be missing, and whether
-each one has an `856` link to fall back on. It is written automatically; there
-is no separate command, and a failure there never fails the harvest.
-
-Global options: `--config`, `--out`, `--name`, `--workers`, `--limit`.
-`harvest` adds `--sets` and `--refresh`; `bag` and `sample` add `--no-zip`;
-`sample` adds `--records` and `--max-mb`.
+Global options: `--config`, `--out`, `--name`, `--workers`.
+`harvest` adds `--sets`, `--refresh` and `--limit`; `bag` and `sample` add
+`--no-zip`; `sample` adds `--records` and `--max-mb`.
 
 ## Output
 
@@ -68,7 +64,6 @@ output/
   harvest/                        records land here first
   NLS_BAG_202609011430.zip
   report.csv
-  no-portfolio.csv
   records.json
   NLS_BAG_202609011430/
     bagit.txt, bag-info.txt, manifest-md5.txt, tagmanifest-md5.txt
@@ -97,8 +92,8 @@ output/
   lock from a virus scanner, leaving the tree half-moved. `build_bag` undoes
   that and retries. If it happens repeatedly, exclude `output/` from real-time
   scanning while bagging.
-- If the zip step is interrupted the archive may be truncated but still look
-  plausible by size. Verify with `zipfile.ZipFile(...).testzip()` or re-run `bag`.
+- Each zip is written as `<name>.partial.zip` and checked before it gets its
+  final name, so an interrupted or corrupt zip never looks finished.
 - `sample` builds an ordinary bag under `output/sample/`, named and structured
   exactly like a full one -- nothing in `bag-info.txt` marks it as a sample, so
   what a reviewer checks is what they would later receive. It only copies, so the
