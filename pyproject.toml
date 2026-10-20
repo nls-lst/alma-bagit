@@ -8,3 +8,9 @@ dependencies = [
     "bagit>=1.9.0",
     "requests>=2.34.2",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "BLE"]
