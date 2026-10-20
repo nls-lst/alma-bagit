@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Harvest output
+output/
+test-out/
+
+# Secrets
+.env
+
+# Local config (copy config.toml.example) and NLS-specific run notes
+config.toml
+handoff.md
+
+# Third-party specs
+*.docx

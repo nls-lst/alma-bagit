@@ -1,0 +1,10 @@
+[project]
+name = "alma-bagit"
+version = "0.1.0"
+description = "Build a BagIt package from Alma sets of e-deposit records, for HighWire LDL intake"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bagit>=1.9.0",
+    "requests>=2.34.2",
+]
