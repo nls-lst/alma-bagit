@@ -20,5 +20,6 @@ test-out/
 config.toml
 handoff.md
 
-# Third-party specs
+# Third-party specs and lists
 *.docx
+MARCfieldslistfromsxls.txt
