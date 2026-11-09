@@ -55,7 +55,8 @@ Metadata is cached in `records.json` and files already on disk are skipped.
 
 Global options: `--config`, `--out`, `--name`, `--workers`.
 `harvest` adds `--sets`, `--refresh` and `--limit`; `bag` and `sample` add
-`--no-zip`; `sample` adds `--records` and `--max-mb`.
+`--no-zip`; `sample` adds `--records`, `--max-mb` and `--include` (MMS IDs
+that must be in the sample).
 
 ## Output
 

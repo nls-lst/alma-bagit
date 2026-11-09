@@ -499,7 +499,13 @@ def sample(args):
         for folder in sorted(data.iterdir())
         if folder.is_dir() and any(f.suffix.lower() in PAYLOAD and f.stat().st_size for f in folder.iterdir())
     ]
-    records = spread(complete, args.records, args.max_mb * 1_000_000)
+    chosen = [pair for pair in complete if pair[0].name in args.include]
+    absent = set(args.include) - {folder.name for folder, _ in chosen}
+    if absent:
+        raise SystemExit(f"Not harvested in {data}: {' '.join(sorted(absent))}")
+    rest = [pair for pair in complete if pair[0].name not in args.include]
+    budget = args.max_mb * 1_000_000 - sum(size for _, size in chosen)
+    records = chosen + spread(rest, args.records - len(chosen), budget)
     if not records:
         raise SystemExit(f"No complete records under {args.max_mb} MB in {data}.")
 
@@ -543,6 +549,7 @@ def main():
     sample_cmd = commands.add_parser("sample", help="build a small bag of a few records, to send for checking")
     sample_cmd.add_argument("--records", type=int, default=25, help="how many records (default 25)")
     sample_cmd.add_argument("--max-mb", type=int, default=20, help="total payload budget (default 20 MB)")
+    sample_cmd.add_argument("--include", nargs="+", default=[], help="MMS IDs to always include")
     sample_cmd.add_argument("--no-zip", action="store_true", help="bag but don't zip")
     sample_cmd.set_defaults(run=sample)
 
