@@ -1,31 +1,23 @@
-# Settings for alma_bag.py. Copy this file to config.toml and fill it in.
-# Any of them can also be overridden on the command line (see --help).
+# Settings for alma_bag.py. Command-line options override these.
 
-# The Alma sets to harvest, one set ID per line. Each set should hold the bib
-# records to deliver; a set's ID is shown in Alma under Manage Sets.
+# Alma set IDs to harvest (shown under Manage Sets).
 sets = [
-    "00000000000000000",  # what this set is, e.g. "E-deposits for HighWire"
+    "00000000000000000",  # what this set is
 ]
 
-# Your institution's code, used to name the bag: {date} becomes the time the
-# bag is built (YYYYMMDDHHMM), e.g. NLS_BAG_202610201431.
+# Bag name; {date} becomes YYYYMMDDHHMM.
 name = "NLS_BAG_{date}"
 
-# Your Alma API gateway. Swap api-eu for api-na, api-ap or api-ca to match
-# your region (China: https://api-cn.hosted.exlibrisgroup.com.cn/almaws/v1).
+# Alma API gateway.
 base = "https://api-eu.hosted.exlibrisgroup.com/almaws/v1"
 
-# Where the harvest, bags and reports are written.
+# Output folder.
 out = "output"
 
-# The local MARC field that lists each file: $a portfolio ID, $b enumeration
-# (records with several files only), $c file name. Pick one your catalogue
-# doesn't already use.
+# Local MARC field listing each file ($a portfolio ID, $b enumeration, $c file name).
 portfolio_field = "986"
 
-# How many files to download at once. Lower it if your file host struggles.
+# Concurrent downloads.
 workers = 8
 
-# The API key does not go in this file, which is easy to share by mistake. Set
-# the ALMA_API_KEY environment variable, or put ALMA_API_KEY=<key> in a .env
-# file beside alma_bag.py.
+# The API key goes in ALMA_API_KEY or a .env file, not here.
