@@ -10,9 +10,9 @@ after your institution. Cover images are not included.
 
 ## Setup
 
-You need [uv](https://docs.astral.sh/uv/), (installs
-dependencies on first run), and an Alma API key with read access to
-Configuration (sets) and Bibliographic Records & Inventory.
+You need [uv](https://docs.astral.sh/uv/) (installs dependencies on first
+run) and an Alma API key with read-only access to **Bibs** (records and
+portfolios) and **Configuration** (sets).
 
 1. Copy `config.toml.example` to `config.toml` and fill in your set IDs, bag
    name and API region.
