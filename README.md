@@ -2,7 +2,7 @@
 
 Builds a zipped [BagIt](https://datatracker.ietf.org/doc/html/rfc8493) package
 (md5 manifests) from Alma sets, one folder per record containing the MARCXML
-and the file linked from the record's electronic portfolio.
+and the files linked from the record's electronic portfolios.
 
 Written for delivering e-deposit records for central ingest.
 It should work for any library on Alma: point it at your own sets and name the bag
@@ -71,6 +71,10 @@ output/
       99123456780004341/
         99123456780004341.xml     MARCXML for the bib
         99123456780004341.pdf     file from the portfolio link
+      99123456790004341/          a record with several portfolios
+        99123456790004341.xml
+        99123456790004341_1.pdf   in volume order
+        99123456790004341_2.pdf
   sample/
     NLS_BAG_202609011430.zip      `sample` output: same shape, fewer records
     NLS_BAG_202609011430/
@@ -81,10 +85,17 @@ output/
 - Portfolio IDs come from the `AVE $8` field returned by `expand=e_avail` on the
   bulk bib call, so each batch of 100 records costs one API call rather than 100.
   Those synthetic `AV*` availability fields are stripped from the saved MARCXML.
-- Every record is expected to have exactly one portfolio. Records with none, with
-  more than one, with no link, or whose download fails are recorded in
-  `report.csv` with a reason and left out of the bag, so the bag only ever
-  contains complete record folders.
+- Each available portfolio becomes one file. A single file is named after the
+  MMS ID; several are numbered `_1`, `_2`... in order of the portfolio's
+  internal description (e.g. "Volume 1"). Portfolios marked "Not Available"
+  are skipped.
+- The MARCXML gets a field per file (`986` by default; `portfolio_field` in
+  `config.toml`): `$a` portfolio ID, `$b` enumeration (several files only),
+  `$c` file name. The portfolio ID is the stable key: numbering can shift if
+  portfolios are added or removed.
+- Records with no available portfolio, with no link, or whose download fails are
+  recorded in `report.csv` with a reason and left out of the bag, so the bag
+  only ever contains complete record folders.
 - The retry settings assume a file host that is unreliable under sustained load.
   Retries are patient (~7 min per file) and short stalls don't turn
   into failures. If yours throttles instead, drop `--workers`.

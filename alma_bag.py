@@ -1,5 +1,5 @@
 """Harvest Alma sets into a BagIt package: one folder per record holding the
-MARCXML and the file linked from its electronic portfolio.
+MARCXML and the files linked from its electronic portfolios.
 
     uv run alma_bag.py                     # harvest the sets, then bag them
 
@@ -21,6 +21,7 @@ import functools
 import itertools
 import json
 import os
+import re
 import shutil
 import time
 import tomllib
@@ -61,6 +62,7 @@ DEFAULTS = {
     "name": "BAG_{date}",
     "workers": 8,
     "sets": [],
+    "portfolio_field": "986",
 }
 CONFIG = {}
 
@@ -123,8 +125,18 @@ def subfields(record, tag, code):
     ]
 
 
+# Each <tag> field in a MARCXML record as {code: value}.
+def fields(record, tag):
+    return [
+        {sub.get("code"): (sub.text or "").strip() for sub in field.findall("subfield")}
+        for field in record.findall("datafield")
+        if field.get("tag") == tag
+    ]
+
+
+# `parts` holds one entry per available portfolio: id, url, enumeration, file name.
 def row_for(mms_id, **values):
-    return dict.fromkeys(FIELDS, "") | {"mms_id": mms_id, "portfolios": 0} | values
+    return dict.fromkeys(FIELDS, "") | {"mms_id": mms_id, "portfolios": 0, "parts": []} | values
 
 
 # --- harvest ----------------------------------------------------------------
@@ -164,8 +176,9 @@ def fetch_bibs(mms_ids, root):
             field = {el.tag: (el.text or "").strip() for el in bib}
             mms_id = field.get("mms_id", "")
             record = bib.find("record")
-            # AVE $8 is the portfolio ID.
-            portfolios = subfields(record, "AVE", "8") if record is not None else []
+            # AVE $8 is the portfolio ID, $e its availability.
+            portfolios = fields(record, "AVE") if record is not None else []
+            available = [p["8"] for p in portfolios if p.get("e") == "Available" and p.get("8")]
             links = subfields(record, "856", "u") if record is not None else []
             row = rows[mms_id] = row_for(
                 mms_id,
@@ -183,10 +196,10 @@ def fetch_bibs(mms_ids, root):
                 row["status"] = "no marcxml returned"
             elif not portfolios:
                 row["status"] = "no portfolio attached"
-            elif len(portfolios) > 1:
-                row["status"] = f"{len(portfolios)} portfolios: {' '.join(portfolios)}"
+            elif not available:
+                row["status"] = "no available portfolio"
             else:
-                row["portfolio_id"] = portfolios[0]
+                row.update(portfolio_id=" ".join(available), parts=[{"id": pid} for pid in available])
                 save_marcxml(record, root / mms_id / f"{mms_id}.xml")
         for missing in set(batch) - set(rows):
             rows[missing] = row_for(missing, status="bib not returned")
@@ -194,20 +207,35 @@ def fetch_bibs(mms_ids, root):
     return list(rows.values())
 
 
-# Alma prefixes static links with `jkey=`.
-def portfolio_url(mms_id, portfolio_id):
-    details = get(f"bibs/{mms_id}/portfolios/{portfolio_id}").find("linking_details")
+# The link (Alma prefixes static ones with `jkey=`) and the enumeration, e.g. "Volume 1".
+def portfolio_details(mms_id, portfolio_id):
+    portfolio = get(f"bibs/{mms_id}/portfolios/{portfolio_id}")
+    details, url = portfolio.find("linking_details"), ""
     for tag in ("static_url_override", "url", "static_url", "dynamic_url"):
-        url = (details.findtext(tag) or "").strip() if details is not None else ""
-        if url:
-            return url.removeprefix("jkey=").strip()
-    return ""
+        url = url or ((details.findtext(tag) or "").strip() if details is not None else "")
+    return url.removeprefix("jkey=").strip(), (portfolio.findtext("internal_description") or "").strip()
 
 
-# The downloaded file for a record, ignoring zero-byte files.
-def payload_file(row, root):
+# Sorts "Volume 2" before "Volume 10".
+def natural(text):
+    return [int(piece) if piece.isdigit() else piece.lower() for piece in re.split(r"(\d+)", text)]
+
+
+# One file is named after the MMS ID; several are <mms_id>_1, _2... in volume order.
+def name_parts(row):
+    parts = row["parts"]
+    if len(parts) == 1:
+        parts[0]["name"] = row["mms_id"]
+        return
+    parts.sort(key=lambda part: (natural(part["enum"]), part["id"]))
+    for number, part in enumerate(parts, 1):
+        part["name"] = f"{row['mms_id']}_{number}"
+
+
+# The downloaded file for a part, ignoring zero-byte files.
+def part_file(row, part, root):
     folder = root / row["mms_id"]
-    hits = (p for p in folder.glob(f"{row['mms_id']}.*") if p.suffix in PAYLOAD and p.stat().st_size)
+    hits = (p for p in folder.glob(f"{part.get('name')}.*") if p.suffix in PAYLOAD and p.stat().st_size)
     return next(hits, None)
 
 
@@ -216,46 +244,81 @@ def marcxml(row, root):
 
 
 def record_complete(row, root):
-    return bool(row["portfolio_id"] and marcxml(row, root).exists() and payload_file(row, root))
+    parts = row["parts"]
+    return bool(parts and marcxml(row, root).exists() and all(part_file(row, p, root) for p in parts))
+
+
+def download(row, part, root):
+    response = files.get(part["url"], timeout=300)
+    response.raise_for_status()
+    if not response.content:
+        raise ValueError("empty response body")
+    suffix = Path(urlparse(part["url"]).path).suffix.lower()
+    if suffix not in PAYLOAD:
+        suffix = ".epub" if "epub" in response.headers.get("Content-Type", "") else ".pdf"
+    (root / row["mms_id"] / (part["name"] + suffix)).write_bytes(response.content)
+
+
+# A field per file in the MARCXML: $a portfolio ID, $b enumeration (several files only), $c file name.
+def add_portfolio_fields(row, root):
+    tag, path = CONFIG["portfolio_field"], marcxml(row, root)
+    datafield, subfield = f"{{{MARC_NS}}}datafield", f"{{{MARC_NS}}}subfield"
+    tree = ET.parse(path)
+    record = tree.getroot().find(f"{{{MARC_NS}}}record")
+    for old in [f for f in record.findall(datafield) if f.get("tag") == tag]:
+        record.remove(old)
+    later = [i for i, el in enumerate(record) if el.tag == datafield and el.get("tag") > tag]
+    position = later[0] if later else len(record)
+    for offset, part in enumerate(row["parts"]):
+        field = ET.Element(datafield, ind1=" ", ind2=" ", tag=tag)
+        values = {"a": part["id"], "b": part["enum"] if len(row["parts"]) > 1 else "", "c": part["file"]}
+        for code, value in values.items():
+            if value:
+                ET.SubElement(field, subfield, code=code).text = value
+        record.insert(position + offset, field)
+    ET.register_namespace("", MARC_NS)
+    ET.indent(tree, "  ")
+    tree.write(path, encoding="utf-8", xml_declaration=True)
 
 
 def fetch_file(row, root):
-    done = payload_file(row, root)
-    if done:
-        row.update(file=done.name, status="ok")
-        return
+    parts = row["parts"]
     try:
-        row["url"] = row.get("url") or portfolio_url(row["mms_id"], row["portfolio_id"])
-        if not row["url"]:
+        for part in parts:
+            if "url" not in part:
+                part["url"], part["enum"] = portfolio_details(row["mms_id"], part["id"])
+        if not all(part["url"] for part in parts):
             row["status"] = "portfolio has no link"
             return
-        response = files.get(row["url"], timeout=300)
-        response.raise_for_status()
-        if not response.content:
-            raise ValueError("empty response body")
-        suffix = Path(urlparse(row["url"]).path).suffix.lower()
-        if suffix not in PAYLOAD:
-            suffix = ".epub" if "epub" in response.headers.get("Content-Type", "") else ".pdf"
-        path = root / row["mms_id"] / (row["mms_id"] + suffix)
-        path.write_bytes(response.content)
-        row.update(file=path.name, status="ok")
+        name_parts(row)
+        for part in parts:
+            if not part_file(row, part, root):
+                download(row, part, root)
+            part["file"] = part_file(row, part, root).name
+        add_portfolio_fields(row, root)
+        row.update(file=" ".join(p["file"] for p in parts), url=" ".join(p["url"] for p in parts), status="ok")
     except Exception as exc:  # noqa: BLE001
         row["status"] = f"failed: {type(exc).__name__}: {exc}"
 
 
 def load_rows(args, root, cache):
-    if cache.exists() and not args.refresh:
-        rows = json.loads(cache.read_text(encoding="utf-8"))[: args.limit]
+    cached = json.loads(cache.read_text(encoding="utf-8")) if cache.exists() and not args.refresh else None
+    if cached and not all("parts" in row for row in cached):
+        print(f"{cache} is from an older version - rebuilding it")
+        cached = None
+    if cached is not None:
+        rows = cached[: args.limit]
         print(f"Reusing metadata for {len(rows)} records ({cache}; --refresh to rebuild)")
         # The MARCXML isn't cached, so a fresh harvest folder needs it again.
-        missing = [r["mms_id"] for r in rows if r["portfolio_id"] and not marcxml(r, root).exists()]
+        missing = [r["mms_id"] for r in rows if r["parts"] and not marcxml(r, root).exists()]
         if missing:
             print(f"Fetching MARCXML for {len(missing)} records...")
             fresh = {r["mms_id"]: r for r in fetch_bibs(missing, root)}
             for row in rows:
                 new = fresh.get(row["mms_id"])
                 if new:
-                    row.update(new, url=row["url"] if new["portfolio_id"] == row["portfolio_id"] else "")
+                    same = new["portfolio_id"] == row["portfolio_id"]
+                    row.update(new, parts=row["parts"] if same else new["parts"])
         return rows
     if not args.sets:
         raise SystemExit("No sets to harvest - add them to config.toml or pass --sets.")
@@ -269,7 +332,7 @@ def load_rows(args, root, cache):
 
 
 def download_all(rows, root, workers):
-    todo = [r for r in rows if r["portfolio_id"]]
+    todo = [r for r in rows if r["parts"]]
     counter = itertools.count(1)
 
     def download(row):
@@ -289,7 +352,7 @@ def write_report(rows, root, report, announce=True):
     for row in done:
         row["status"] = "ok"
     with report.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, FIELDS)
+        writer = csv.DictWriter(handle, FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
     if announce:
@@ -317,6 +380,9 @@ def harvest(args):
     if orphans:
         with_link = sum(1 for r in orphans if r.get("856_url"))
         print(f"  {len(orphans)} have no portfolio ({with_link} with an 856 link)")
+    multi = sum(1 for r in done if len(r["parts"]) > 1)
+    if multi:
+        print(f"  {multi} have more than one file")
     if args.limit:
         print("Test run (--limit): not cached and not bagged. `sample` will bag what's here.")
     elif len(done) < len(rows):
@@ -392,7 +458,7 @@ def bag(args):
         if not done:
             raise SystemExit("Nothing to bag.")
         for row in rows:
-            if row["portfolio_id"] and not record_complete(row, work):
+            if row["parts"] and not record_complete(row, work):
                 shutil.rmtree(work / row["mms_id"], ignore_errors=True)
         work.rename(root)
         print(f"Bagging {len(done)} of {len(rows)} records into {root}...")
