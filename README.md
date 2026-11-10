@@ -112,3 +112,8 @@ output/
   full bag is untouched. Records are chosen for a spread of file sizes within a
   total budget (`--max-mb`, 20 by default) so the zip stays emailable; raise the
   budget if you want bigger files than the few MB that fits at the default.
+
+## Licence
+
+Copyright 2026 National Library of Scotland. Licensed under the
+[Apache Licence 2.0](LICENSE).
